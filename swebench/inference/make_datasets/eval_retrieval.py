@@ -39,7 +39,12 @@ def main(dataset_name_or_path, split):
                 1:
             ]  # first file is usually the readme, we don't want to count that
         retrieved_files = set(retrieved_files)
+        print("Retrieved files for: ")
+        print(f"{datum['instance_id']}")
+        print(f"{retrieved_files}")
         gold_files = set(patch_files_pattern.findall(patch_files[instance_id]))
+        print("Gold files:")
+        print(f"{gold_files}")
         if len(gold_files) == 0:
             print(f"WARNING: Instance {datum['instance_id']} has no gold files")
             continue
@@ -61,7 +66,7 @@ def main(dataset_name_or_path, split):
 if __name__ == "__main__":
     parser = ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--dataset_name_or_path", type=str, default="princeton-nlp/SWE-bench_bm25_13K"
+        "--dataset_name_or_path", type=str, default="princeton-nlp/SWE-bench_Lite_oracle"
     )
     parser.add_argument("--split", type=str, default="test")
     args = parser.parse_args()

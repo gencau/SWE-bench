@@ -66,6 +66,7 @@ setuptools.setup(
             "triton",
             "flash_attn",
             "requests",
+            "langchain_ollama"
         ],
         "test": [
             "pytest",

@@ -8,6 +8,15 @@ from git import Repo
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import traceback
+import networkx as nx
+from lib2to3.refactor import RefactoringTool, get_fixers_from_package
+from lib2to3.pgen2.parse import ParseError
+
+# This is to handle python2 code
+fixers = get_fixers_from_package('lib2to3.fixes')
+refactorer = RefactoringTool(fixers)
+
 
 DIFF_PATTERN = re.compile(r"^diff(?:.*)")
 PATCH_PATTERN = re.compile(
@@ -302,3 +311,89 @@ def string_to_bool(v):
         raise ArgumentTypeError(
             f"Truthy value expected: got {v} but expected one of yes/no, true/false, t/f, y/n, 1/0 (case insensitive)."
         )
+    
+def build_python_dependency_graph(source_dir:Path):
+    """
+    Build a file-level import dependency graph by manually parsing AST,
+    automatically detecting top-level roots (e.g., 'src', 'lib', etc.),
+    and mapping absolute imports to the correct directory.
+    """
+    project_root = Path(source_dir).resolve()
+
+    # Detect candidate roots: project_root plus any immediate subdir containing .py files
+    roots = [project_root]
+    for sub in project_root.iterdir():
+        if sub.is_dir() and any(sub.rglob("*.py")):
+            roots.append(sub)
+    # Deduplicate while preserving order
+    seen = set()
+    roots = [r for r in roots if not (r in seen or seen.add(r))]
+
+    G = nx.DiGraph()
+
+    # Add all Python files as nodes
+    py_files = list(project_root.rglob("*.py"))
+    for py_file in py_files:
+        rel_path = py_file.relative_to(project_root).as_posix()
+        G.add_node(rel_path)
+
+    # Parse imports and add edges
+    for py_file in py_files:
+        try:
+            rel_src = py_file.relative_to(project_root).as_posix()
+            source = py_file.read_text()
+            tree = ast.parse(source, filename=str(rel_src))
+        except SyntaxError as err:
+            print(f"Syntax error in {rel_src}:{err.lineno}:{err.offset} - {err.msg!r}")
+            if (err.text):
+                print(err.text.rstrip())
+                print(" " + str((err.offset - 1)) + "^")
+
+            try:
+                refactored = refactorer.refactor_string(source, name=rel_src)
+            except ParseError as pe:
+                print(f"Refactor parse error {rel_src} - {pe!r}")
+                continue
+            except Exception as e_ref:
+                print(f"Refactor error: {rel_src} - {type(e_ref).__name__}: {e_ref}")
+                traceback.print_exc()
+                continue
+            try:
+                # Sometimes it's a py2 vs py3 error, try to fix
+                tree = ast.parse(str(refactored), filename=rel_src)
+            except Exception as e:
+                # Skip files that fail to parse
+                print(f"Could not parse {rel_src} after refactoring, got: {e!r}")
+                continue
+        except Exception as exc:
+            # This can happen on files that point to files that don't exist (e.g. __init__.py)
+            print(f"Got unexpected error while attempting to parse {rel_src}: {exc!r}")
+
+        for node in ast.walk(tree):
+            module_names = []
+            if isinstance(node, ast.Import):
+                module_names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                base = node.module or ""
+                module_names = [base] + [f"{base}.{alias.name}" for alias in node.names] if base else [alias.name for alias in node.names]
+            else:
+                continue
+
+            for mod in module_names:
+                if not mod:
+                    continue
+                parts = mod.split(".")
+                # Try each root for mapping
+                for root in roots:
+                    candidate_file = root.joinpath(*parts).with_suffix(".py")
+                    rel_dst = candidate_file.relative_to(project_root).as_posix()
+                    if candidate_file.exists():
+                        G.add_edge(rel_src, str(rel_dst))
+                        break
+                    candidate_pkg = root.joinpath(*parts) / "__init__.py"
+                    rel_dst = candidate_pkg.relative_to(project_root).as_posix()
+                    if candidate_pkg.exists():
+                        G.add_edge(rel_src, str(rel_dst))
+                        break
+
+    return G

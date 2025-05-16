@@ -170,3 +170,7 @@ cython_debug/
 data/repos/copies
 notebooks/
 *logs/
+retreival_results*
+repos/
+hf_datasets/
+bm25_results/

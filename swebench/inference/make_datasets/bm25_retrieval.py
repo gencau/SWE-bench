@@ -14,7 +14,7 @@ from pathlib import Path
 from tqdm.auto import tqdm
 from argparse import ArgumentParser
 
-from swebench.inference.make_datasets.utils import list_files, string_to_bool
+from swebench.inference.make_datasets.utils import list_files, string_to_bool, build_python_dependency_graph
 
 import logging
 
@@ -306,7 +306,7 @@ def get_remaining_instances(instances, output_file):
     return remaining_instances
 
 
-def search(instance, index_path):
+def search(instance, index_path, k=5):
     """
     Searches for relevant documents in the given index for the given instance.
 
@@ -326,7 +326,7 @@ def search(instance, index_path):
             try:
                 hits = searcher.search(
                     instance["problem_statement"][:cutoff],
-                    k=20,
+                    k=k,
                     remove_dups=True,
                 )
             except Exception as e:
@@ -346,7 +346,7 @@ def search(instance, index_path):
         return None
 
 
-def search_indexes(remaining_instance, output_file, all_index_paths):
+def search_indexes(remaining_instance, output_file, all_index_paths, k, include_dependencies=False, repo_dir=""):
     """
     Searches the indexes for the given instances and writes the results to the output file.
 
@@ -360,9 +360,39 @@ def search_indexes(remaining_instance, output_file, all_index_paths):
         if instance_id not in all_index_paths:
             continue
         index_path = all_index_paths[instance_id]
-        results = search(instance, index_path)
+        results = search(instance, index_path, k)
         if results is None:
             continue
+
+        if (include_dependencies == True):
+            # Include first-level dependencies
+            repo_path = instance["repo"].replace("/", "__")
+            repo_path += "__" + instance["base_commit"]
+            print(f"Looking in: {str(repo_dir) + '/' + repo_path}")
+
+            graph = build_python_dependency_graph(repo_dir / Path(repo_path))
+            for file in results["hits"]:
+                callers = graph.in_edges(file["docid"])
+                callees = graph.out_edges(file["docid"])
+                # Python returns weirdness, get rid of it
+                if len(callers) > 0:
+                    # Flatten the list
+                    flattened_callers = [item for tup in callers for item in tup]
+                    callers = list(dict.fromkeys(flattened_callers))
+                if len(callees) > 0:
+                    flattened_callees = [item for tup in callees for item in tup]
+                    callees = list(dict.fromkeys(flattened_callees))
+                print(f"Got callers: {callers} and callees: {callees} for {file}")
+
+
+            results["all_files"] = [hit["docid"] for hit in results["hits"]]
+            if (len(callers) > 0):
+                results["all_files"].extend(callers)
+                results["callers"] = callers
+            if (len(callees) > 0):
+                results["all_files"].extend(callees)
+                results["callees"] = callees
+            print(f"All files contains: {results['all_files']}")
         with FileLock(output_file.as_posix() + ".lock"):
             with open(output_file, "a") as out_file:
                 print(json.dumps(results), file=out_file, flush=True)
@@ -466,6 +496,9 @@ def main(
     num_shards,
     splits,
     leave_indexes,
+    k, 
+    reindex,
+    include_dependencies
 ):
     document_encoding_func = DOCUMENT_ENCODING_FUNCTIONS[document_encoding_style]
     token = os.environ.get("GITHUB_TOKEN", "git")
@@ -492,35 +525,40 @@ def main(
     root_dir, root_dir_name = get_root_dir(
         dataset_name, output_dir, document_encoding_style
     )
-    try:
-        all_index_paths = get_index_paths(
-            remaining_instances,
-            root_dir_name,
-            document_encoding_func,
-            python,
-            token,
-            output_file,
-        )
-    except KeyboardInterrupt:
-        logger.info(f"Cleaning up {root_dir}")
-        del_dirs = list(root_dir.glob("repo__*"))
-        if leave_indexes:
-            index_dirs = list(root_dir.glob("index__*"))
-            del_dirs += index_dirs
-        for dirname in del_dirs:
-            shutil.rmtree(dirname, ignore_errors=True)
-    logger.info(f"Finished indexing {len(all_index_paths)} instances")
-    search_indexes(remaining_instances, output_file, all_index_paths)
+    if reindex == True:
+        print("Reindexing...")
+        try:
+            all_index_paths = get_index_paths(
+                remaining_instances,
+                root_dir_name,
+                document_encoding_func,
+                python,
+                token,
+                output_file,
+            )
+        except KeyboardInterrupt:
+            logger.info(f"Cleaning up {root_dir}")
+            del_dirs = list(root_dir.glob("repo__*"))
+            if leave_indexes:
+                index_dirs = list(root_dir.glob("index__*"))
+                del_dirs += index_dirs
+            for dirname in del_dirs:
+                shutil.rmtree(dirname, ignore_errors=True)
+        logger.info(f"Finished indexing {len(all_index_paths)} instances")
+    search_indexes(remaining_instances, output_file, all_index_paths, k, include_dependencies=include_dependencies, 
+                   repo_dir="/Volumes/T9/repos")
     missing_ids = get_missing_ids(instances, output_file)
     logger.warning(f"Missing indexes for {len(missing_ids)} instances.")
     logger.info(f"Saved retrieval results to {output_file}")
-    del_dirs = list(root_dir.glob("repo__*"))
-    logger.info(f"Cleaning up {root_dir}")
-    if leave_indexes:
-        index_dirs = list(root_dir.glob("index__*"))
-        del_dirs += index_dirs
-    for dirname in del_dirs:
-        shutil.rmtree(dirname, ignore_errors=True)
+
+    ## We want to be able to run this several times...
+    #del_dirs = list(root_dir.glob("repo__*"))
+    #logger.info(f"Cleaning up {root_dir}")
+    #if leave_indexes:
+    #    index_dirs = list(root_dir.glob("index__*"))
+    #    del_dirs += index_dirs
+    #for dirname in del_dirs:
+    #    shutil.rmtree(dirname, ignore_errors=True)
 
 
 if __name__ == "__main__":
@@ -528,7 +566,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset_name_or_path",
         type=str,
-        default="princeton-nlp/SWE-bench",
+        default="princeton-nlp/SWE-bench_Verified",
         help="Dataset to use for test set from HuggingFace Datasets or path to a save_to_disk directory.",
     )
     parser.add_argument(
@@ -536,10 +574,13 @@ if __name__ == "__main__":
         choices=DOCUMENT_ENCODING_FUNCTIONS.keys(),
         default="file_name_and_contents",
     )
-    parser.add_argument("--output_dir", default="./retreival_results")
-    parser.add_argument("--splits", nargs="+", default=["train", "test"])
+    parser.add_argument("--output_dir", default="./bm25_results")
+    parser.add_argument("--splits", nargs="+", default=["test"])
     parser.add_argument("--shard_id", type=int)
     parser.add_argument("--num_shards", type=int, default=20)
     parser.add_argument("--leave_indexes", type=string_to_bool, default=True)
+    parser.add_argument("--k", type=int, default=20)
+    parser.add_argument("--reindex", type=bool, default=True)
+    parser.add_argument("--include_dependencies", type=bool, default=False)
     args = parser.parse_args()
     main(**vars(args))
