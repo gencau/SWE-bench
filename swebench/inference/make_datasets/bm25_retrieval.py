@@ -9,6 +9,8 @@ from filelock import FileLock
 from typing import Any
 from datasets import load_from_disk, load_dataset
 from pyserini.search.lucene import LuceneSearcher
+from pyserini.index.lucene import IndexReader
+
 from git import Repo
 from pathlib import Path
 from tqdm.auto import tqdm
@@ -346,7 +348,7 @@ def search(instance, index_path, k=5):
         return None
 
 
-def search_indexes(remaining_instance, output_file, all_index_paths, k, include_dependencies=False, repo_dir=""):
+def search_indexes(remaining_instance, output_file, all_index_paths, k, include_dependencies=False, repo_dir="", percent_k=0):
     """
     Searches the indexes for the given instances and writes the results to the output file.
 
@@ -360,7 +362,16 @@ def search_indexes(remaining_instance, output_file, all_index_paths, k, include_
         if instance_id not in all_index_paths:
             continue
         index_path = all_index_paths[instance_id]
-        results = search(instance, index_path, k)
+
+        top_k = k
+        if k == 0: # Use % of files as k
+            reader = IndexReader(index_path.as_posix())
+            stats = reader.stats()
+            print("Documents in index:", stats['documents'])
+            top_k = round((percent_k/100) * stats['documents'])
+            print(f"Will retrieve top k: {top_k}")
+
+        results = search(instance, index_path, top_k)
         if results is None:
             continue
 
@@ -498,7 +509,8 @@ def main(
     leave_indexes,
     k, 
     reindex,
-    include_dependencies
+    include_dependencies,
+    percent_k
 ):
     document_encoding_func = DOCUMENT_ENCODING_FUNCTIONS[document_encoding_style]
     token = os.environ.get("GITHUB_TOKEN", "git")
@@ -546,7 +558,7 @@ def main(
                 shutil.rmtree(dirname, ignore_errors=True)
         logger.info(f"Finished indexing {len(all_index_paths)} instances")
     search_indexes(remaining_instances, output_file, all_index_paths, k, include_dependencies=include_dependencies, 
-                   repo_dir="/Volumes/T9/repos")
+                   repo_dir="/Volumes/T9/repos", percent_k=percent_k)
     missing_ids = get_missing_ids(instances, output_file)
     logger.warning(f"Missing indexes for {len(missing_ids)} instances.")
     logger.info(f"Saved retrieval results to {output_file}")
@@ -579,8 +591,10 @@ if __name__ == "__main__":
     parser.add_argument("--shard_id", type=int)
     parser.add_argument("--num_shards", type=int, default=20)
     parser.add_argument("--leave_indexes", type=string_to_bool, default=True)
-    parser.add_argument("--k", type=int, default=20)
     parser.add_argument("--reindex", type=bool, default=True)
     parser.add_argument("--include_dependencies", type=bool, default=False)
+    # At least one of these must be provided
+    parser.add_argument("--k", type=int, default=0)
+    parser.add_argument("--percent_k", type=int, default=0)
     args = parser.parse_args()
     main(**vars(args))

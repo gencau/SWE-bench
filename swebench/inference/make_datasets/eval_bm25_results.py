@@ -93,7 +93,8 @@ def compute_instance_metrics(
 # --------------------------------------------------------------------------- #
 # main evaluation                                                             #
 # --------------------------------------------------------------------------- #
-def evaluate(results_path: str, dataset_name_or_path: str, split: str, out_path: str, k: int):
+def evaluate(results_path: str, dataset_name_or_path: str, split: str, out_path: str, k: int,
+             percent_k: int):
     gold = load_gold(dataset_name_or_path, split)
 
     enriched_rows, per_instance_df_rows = [], []
@@ -106,17 +107,28 @@ def evaluate(results_path: str, dataset_name_or_path: str, split: str, out_path:
             obj = json.loads(line)
             iid = obj["instance_id"]
 
+            num_hits = 0
             pred_files = []
             if "all_files" in obj and obj["all_files"]:
                 pred_files = obj["all_files"]
+                all_files = list(obj["all_files"])
+                num_hits = len(all_files)
             else:
                 pred_files = [h["docid"] for h in obj["hits"]]
+                num_hits = len(pred_files)
             exp_files = gold.get(iid, [])
 
             if not exp_files:
                 logger.warning("No gold files for instance %s – skipping", iid)
                 continue
 
+            if percent_k > 0:
+                # Calculate k based on percent k
+                # Initially the max number of files is retrieved (100%)
+                k = round(max(1, (percent_k/100) * num_hits))
+                # Slice to the number of k we're looking for
+                pred_files = pred_files[:k]
+            print(f"Using k={k}, had a total of {num_hits} documents")
             inst_metrics = compute_instance_metrics(exp_files, pred_files, k)
 
             # attach metrics to JSON row
@@ -167,21 +179,26 @@ def evaluate(results_path: str, dataset_name_or_path: str, split: str, out_path:
     mf_mrr = _safe_mean(mf_subset["MRR"])
 
     # overall corpus‑level F1 (macro, like your original script)
-    def overall_f1(subset, recall_col):
-        tp = fp = fn = 0
+    def overall_f1_and_k(subset):
+        tp = fp = fn = k = 0
         for _, row in subset.iterrows():
             gt_set, pr_set = set(row["expected_files"]), set(row["topk_files"])
             tp += len(gt_set & pr_set)
             fp += len(pr_set - gt_set)
             fn += len(gt_set - pr_set)
+            k += len(pr_set)
+
         if tp == 0 or tp + fp == 0 or tp + fn == 0:
             return np.nan
         precision = tp / (tp + fp)
         recall = tp / (tp + fn)
-        return 2 * precision * recall / (precision + recall)
+        return 2 * precision * recall / (precision + recall), k
 
-    overall_sf_f1 = overall_f1(sf_subset, "recall@1")
-    overall_mf_f1 = overall_f1(mf_subset, "recall@2")
+    overall_sf_f1, sf_k = overall_f1_and_k(sf_subset)
+    overall_mf_f1, mf_k = overall_f1_and_k(mf_subset)
+
+    sf_average_k = sf_k / len(sf_subset) if len(sf_subset) > 0 else 0
+    mf_average_k = mf_k / len(mf_subset) if len(mf_subset) > 0 else 0
 
     # ------------------------------------------------------------------ #
     # 3. print summary                                                   #
@@ -196,6 +213,8 @@ def evaluate(results_path: str, dataset_name_or_path: str, split: str, out_path:
     print(f"Hit‑Rate@k            : {sf_hit_k:.4f}")
     print(f"All‑files‑predicted   : {sf_all_pred:.4f}\n")
     print(f"Mean Reciprocal Rank  : {sf_mrr:.4f}\n")
+    print(f"Overall Average k     : {sf_average_k}")
+
 
     print("---- Multi‑file bugs ----")
     print(f"Precision@2           : {mf_p2:.4f}")
@@ -208,6 +227,8 @@ def evaluate(results_path: str, dataset_name_or_path: str, split: str, out_path:
     print(f"Hit‑Rate@k            : {mf_hit_k:.4f}")
     print(f"All‑files‑predicted   : {mf_all_pred:.4f}")
     print(f"Mean Reciprocal Rank  : {mf_mrr:.4f}\n")
+    print(f"Overall Average k     : {mf_average_k}")
+
 
 
     # ------------------------------------------------------------------ #
@@ -239,7 +260,8 @@ def main():
         required=False,
         help="Where to store JSONL with metric columns (default: <results>_with_metrics.jsonl)",
     )
-    p.add_argument("--k", required=False, default=5)
+    p.add_argument("--k", type=int, required=False, default=0)
+    p.add_argument("--percent_k", type=int, default=0)
     args = p.parse_args()
 
     output_path = (
@@ -255,7 +277,8 @@ def main():
         args.dataset_name_or_path,
         args.split,
         output_path,
-        args.k
+        args.k,
+        args.percent_k
     )
 
 
